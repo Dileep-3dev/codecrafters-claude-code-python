@@ -1,0 +1,9 @@
+{
+    "[plaintext]": {
+        "editor.quickSuggestions": {
+            "other": false,
+            "comments": false,
+            "strings": false
+        }
+    }
+}

@@ -21,8 +21,26 @@ def main():
     chat = client.chat.completions.create(
         model="anthropic/claude-haiku-4.5",
         messages=[{"role": "user", "content": args.p}],
+        tools=[
+            {
+            "type":"function",
+            "function":{
+                "name":"Read",
+                "dscription":"Reads and displays the content of the file",
+                "parameters":{
+                    "type":"object",
+                    "properties":{
+                        "file_path":{
+                            "type":"string",
+                            "description":"Gives the path of the file"
+                        }
+                    },
+                    "required":["file_path"]
+                }
+            }
+            }
+        ]
     )
-
     if not chat.choices or len(chat.choices) == 0:
         raise RuntimeError("no choices in response")
 
