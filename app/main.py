@@ -62,6 +62,25 @@ def main():
     }
   }
                 },
+                {
+                    {
+  "type": "function",
+  "function": {
+    "name": "Bash",
+    "description": "Execute a shell command",
+    "parameters": {
+      "type": "object",
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "The command to execute"
+        }
+      }
+    }
+  }
+}
+                }
             ],
         )
         if not chat.choices or len(chat.choices) == 0:
@@ -96,6 +115,8 @@ def main():
                 with open(arguments["file_path"], "w") as f:
                     f.write(arguments["content"])
                 result = f"Wrote {len(arguments['content'])} characters to {arguments['file_path']}"
+            else:
+                with open(arguments["file_path"],"w") as f:
             messages.append(
                 {"role": "tool", "tool_call_id": tool_call.id, "content": result}
             )
