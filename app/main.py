@@ -1,7 +1,7 @@
 import argparse
 import os
 import json
-
+import subprocess
 from openai import OpenAI
 
 API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -115,11 +115,18 @@ def main():
                 with open(arguments["file_path"], "w") as f:
                     f.write(arguments["content"])
                 result = f"Wrote {len(arguments['content'])} characters to {arguments['file_path']}"
-            else:
-                with open(arguments["file_path"],"w") as f:
             messages.append(
                 {"role": "tool", "tool_call_id": tool_call.id, "content": result}
             )
-
+        else:
+            @tool
+            def Bash(command: str) -> str:
+                """Execute a shell command
+                :param command: The command to execute
+    """
+            result = subprocess.run(command.split(), capture_output=True, text=True)
+            if result.stderr:
+                return result.stderr
+        return result.stdout
 if __name__ == "__main__":
     main()
