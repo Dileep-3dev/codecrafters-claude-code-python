@@ -38,6 +38,7 @@ def main():
                                 }
                             },
                             "required": ["file_path"],
+                        },
                     },
                 },
             ],
