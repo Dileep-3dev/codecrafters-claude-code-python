@@ -29,7 +29,7 @@ def main():
                     "type": "function",
                     "function": {
                         "name": "Read",
-                        "description": "Reads a file",
+                        "description": "Reads the content of the file",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -43,7 +43,7 @@ def main():
                     "type": "function",
                     "function": {
                         "name": "Write",
-                        "description": "Write to file",
+                        "description": "Writes the required content to the file",
                         "parameters": {
                             "type": "object",
                             "properties": {
