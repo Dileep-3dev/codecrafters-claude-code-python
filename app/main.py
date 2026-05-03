@@ -20,7 +20,12 @@ def main():
 
     chat = client.chat.completions.create(
         model="anthropic/claude-haiku-4.5",
-        messages=[{"role": "user", "content": args.p}],
+        messages=[{"role": "user", "content": args.p},
+                  {
+  "role": "tool",
+  "tool_call_id": "call_abc123",
+  "content": "# My Project\n\nChemical expiry period: 6 months"
+}],
         tools=[
             {
             "type":"function",
