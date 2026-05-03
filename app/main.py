@@ -1,6 +1,6 @@
 import argparse
 import os
-import sys
+import json
 
 from openai import OpenAI
 
@@ -18,54 +18,61 @@ def main():
 
     client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-    chat = client.chat.completions.create(
-        model="anthropic/claude-haiku-4.5",
-        messages=[{"role": "user", "content": args.p},
-                  {
-  "role": "tool",
-  "tool_call_id": "call_abc123",
-  "content": "# My Project\n\nChemical expiry period: 6 months"
-}],
-        tools=[
-            {
-            "type":"function",
-            "function":{
-                "name":"Read",
-                "dscription":"Reads and displays the content of the file",
-                "parameters":{
-                    "type":"object",
-                    "properties":{
-                        "file_path":{
-                            "type":"string",
-                            "description":"Gives the path of the file"
-                        }
+    messages = [{"role": "user", "content": args.p}]
+    while True:
+        chat = client.chat.completions.create(
+            model="anthropic/claude-haiku-4.5",
+            messages=messages,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "Read",
+                        "description": "Reads and displays the content of the file",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {
+                                    "type": "string",
+                                    "description": "Gives the path of the file",
+                                }
+                            },
+                            "required": ["file_path"],
                     },
-                    "required":["file_path"]
                 }
-            }
-            }
-        ]
-    )
-    if not chat.choices or len(chat.choices) == 0:
-        raise RuntimeError("no choices in response")
-
-    # You can use print statements as follows for debugging, they'll be visible when running tests.
-    message = chat.choices[0].message
-    if message.tool_calls:
-        import json
-        tool_call = message.tool_calls[0]
-        function_name = tool_call.function.name
-        arguments = json.loads(tool_call.function.arguments)
-        if function_name == "Read":
-            with open(arguments["file_path"], "r") as f:
-                print(f.read(), end="")
-    else:
-        print(message.content)
-
-
-    # TODO: Uncomment the following line to pass the first stage
-    # print(chat.choices[0].message.content)
-
+            ],
+        )
+        if not chat.choices or len(chat.choices) == 0:
+            raise RuntimeError("no choices in response")
+        message = chat.choices[0].message
+        assistant_message = {"role": "assistant", "content": message.content}
+        if message.tool_calls:
+            assistant_message["tool_calls"] = []
+            for tool_call in message.tool_calls:
+                assistant_message["tool_calls"].append(
+                    {
+                        "id": tool_call.id,
+                        "type": tool_call.type,
+                        "function": {
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments,
+                        },
+                    }
+                )
+        messages.append(assistant_message)
+        if not message.tool_calls:
+            print(message.content)
+            break
+        for tool_call in message.tool_calls:
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+            result = ""
+            if function_name == "Read":
+                with open(arguments["file_path"], "r") as f:
+                    result = f.read()
+            messages.append(
+                {"role": "tool", "tool_call_id": tool_call.id, "content": result}
+            )
 
 if __name__ == "__main__":
     main()
