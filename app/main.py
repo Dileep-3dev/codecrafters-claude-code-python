@@ -40,6 +40,8 @@ def main():
                             "required": ["file_path"],
                         },
                     },
+                    },
+                    {
                       "type": "function",
   "function": {
     "name": "Write",
@@ -59,7 +61,6 @@ def main():
       }
     }
   }
-
                 },
             ],
         )
@@ -91,6 +92,10 @@ def main():
             if function_name == "Read":
                 with open(arguments["file_path"], "r") as f:
                     result = f.read()
+            elif function_name == "Write":
+                with open(arguments["file_path"], "w") as f:
+                    f.write(arguments["content"])
+                result = f"Wrote {len(arguments['content'])} characters to {arguments['file_path']}"
             messages.append(
                 {"role": "tool", "tool_call_id": tool_call.id, "content": result}
             )
