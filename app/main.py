@@ -39,7 +39,7 @@ def main():
                             },
                             "required": ["file_path"],
                     },
-                }
+                },
             ],
         )
         if not chat.choices or len(chat.choices) == 0:
