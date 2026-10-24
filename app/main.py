@@ -186,12 +186,7 @@ def main():
         })
 
     # Resolve the slash command and expand placeholders before the API call.
-    user_prompt = resolve_prompt(args.p, skills)
-
-    messages.append({
-        "role": "user",
-        "content": user_prompt,
-    })
+        messages.extend(resolve_prompt(args.p, skills))
 
     tools = [
         {
