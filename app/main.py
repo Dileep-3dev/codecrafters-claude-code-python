@@ -1,9 +1,14 @@
 
 import argparse
-import os
 import json
+import os
+import re
 import subprocess
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 from openai import OpenAI
 
 
@@ -12,60 +17,149 @@ BASE_URL = os.getenv(
     "OPENROUTER_BASE_URL",
     "https://openrouter.ai/api/v1",
 )
+MODEL = os.getenv(
+    "OPENROUTER_MODEL",
+    "anthropic/claude-haiku-4.5",
+)
 
 
-def load_skill(skill_name):
-    skill_path = Path(".claude") / "skills" / skill_name / "SKILL.md"
+@dataclass(frozen=True)
+class Skill:
+    name: str
+    description: str
+    path: Path
+    body: str
 
-    with open(skill_path, "r", encoding="utf-8") as f:
-        content = f.read()
 
-    # Extract the body after the YAML frontmatter.
-    parts = content.split("---", 2)
+@dataclass
+class Skills:
+    skills: dict[str, Skill]
 
-    if len(parts) < 3:
-        raise ValueError(
-            f"Invalid SKILL.md frontmatter: {skill_path}"
+    @staticmethod
+    def load(path: Path) -> "Skills":
+        skills = {}
+
+        if not path.is_dir():
+            return Skills(skills={})
+
+        for skill_path in sorted(path.glob("*/SKILL.md")):
+            try:
+                content = skill_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                print(
+                    f"WARN: Cannot read {skill_path}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+
+            sections = content.split("---", maxsplit=2)
+
+            if (
+                len(sections) != 3
+                or sections[0].strip()
+                or not sections[1].strip()
+            ):
+                print(
+                    f"WARN: Invalid frontmatter in {skill_path}",
+                    file=sys.stderr,
+                )
+                continue
+
+            try:
+                metadata = yaml.safe_load(sections[1])
+            except yaml.YAMLError as exc:
+                print(
+                    f"WARN: Invalid YAML in {skill_path}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+
+            if not isinstance(metadata, dict):
+                print(
+                    f"WARN: Invalid metadata in {skill_path}",
+                    file=sys.stderr,
+                )
+                continue
+
+            name = metadata.get("name")
+            description = metadata.get("description")
+
+            if not isinstance(name, str) or not name.strip():
+                print(
+                    f"WARN: Missing name in {skill_path}",
+                    file=sys.stderr,
+                )
+                continue
+
+            if not isinstance(description, str) or not description.strip():
+                print(
+                    f"WARN: Missing description in {skill_path}",
+                    file=sys.stderr,
+                )
+                continue
+
+            skills[name] = Skill(
+                name=name,
+                description=description,
+                path=skill_path,
+                body=sections[2].strip(),
+            )
+
+        return Skills(skills=skills)
+
+    def is_empty(self) -> bool:
+        return not self.skills
+
+    def level1_system_prompt(self) -> str:
+        lines = [
+            "You have access to the following skills:",
+            "",
+        ]
+
+        lines.extend(
+            f"- {skill.name}: {skill.description}"
+            for skill in self.skills.values()
         )
 
-    return parts[2].strip()
+        return "\n".join(lines)
 
 
-def load_skill_descriptions():
-    skills_dir = Path(".claude") / "skills"
-    descriptions = []
+def expand_skill_arguments(body: str, arguments: list[str]) -> str:
+    # Replace indexed placeholders first, before $ARGUMENTS.
+    for index, argument in enumerate(arguments):
+        body = body.replace(f"$ARGUMENTS[{index}]", argument)
+        body = re.sub(
+            rf"\${index}(?!\d)",
+            lambda _: argument,
+            body,
+        )
 
-    if skills_dir.is_dir():
-        for skill_dir in sorted(skills_dir.iterdir()):
-            if not skill_dir.is_dir():
-                continue
+    # Replace $ARGUMENTS with all supplied arguments.
+    body = body.replace("$ARGUMENTS", " ".join(arguments))
 
-            skill_path = skill_dir / "SKILL.md"
+    return body
 
-            if not skill_path.is_file():
-                continue
 
-            with open(skill_path, "r", encoding="utf-8") as f:
-                content = f.read()
+def resolve_prompt(prompt: str, skills: Skills) -> str:
+    if not prompt.startswith("/"):
+        return prompt
 
-            parts = content.split("---", 2)
+    command_parts = prompt[1:].split(maxsplit=1)
+    skill_name = command_parts[0]
+    argument_text = command_parts[1] if len(command_parts) > 1 else ""
 
-            if len(parts) < 3:
-                continue
+    skill = skills.skills.get(skill_name)
 
-            metadata = {}
+    if skill is None:
+        available = ", ".join(skills.skills.keys()) or "(none)"
+        raise ValueError(
+            f"Unknown skill: {skill_name}. Available skills: {available}"
+        )
 
-            for line in parts[1].splitlines():
-                if ":" in line:
-                    key, value = line.split(":", 1)
-                    metadata[key.strip()] = value.strip().strip("\"'")
+    # Split arguments on whitespace, as in the example implementation.
+    arguments = argument_text.split()
 
-            name = metadata.get("name", skill_dir.name)
-            description = metadata.get("description", "")
-
-            descriptions.append(f"- {name}: {description}")
-
-    return descriptions
+    return expand_skill_arguments(skill.body, arguments)
 
 
 def main():
@@ -81,35 +175,42 @@ def main():
         base_url=BASE_URL,
     )
 
-    # List skill names and descriptions without loading their bodies.
-    descriptions = load_skill_descriptions()
-    system_prompt = "You have access to the following skills:\n"
+    # Load skill metadata and bodies into memory.
+    # Only the selected skill's body will be sent to the model.
+    skills = Skills.load(Path(".claude/skills"))
 
-    if descriptions:
-        system_prompt += "\n" + "\n".join(descriptions)
+    messages = []
 
-    # Resolve slash commands and load only the selected skill body.
-    user_prompt = args.p
+    if not skills.is_empty():
+        system_prompt = skills.level1_system_prompt()
+        messages.append({
+            "role": "system",
+            "content": system_prompt,
+        })
 
-    if user_prompt.startswith("/"):
-        skill_name = user_prompt[1:].split(maxsplit=1)[0]
-        user_prompt = load_skill(skill_name)
+        print(
+            f"=== SYSTEM PROMPT ===\n"
+            f"{system_prompt}\n"
+            f"=====================",
+            file=sys.stderr,
+        )
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+    prompt = resolve_prompt(args.p, skills)
+    messages.append({
+        "role": "user",
+        "content": prompt,
+    })
 
     tools = [
         {
             "type": "function",
             "function": {
                 "name": "Read",
-                "description": "Reads the content of the file",
+                "description": "Reads the content of a file",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "file_path": {"type": "string"}
+                        "file_path": {"type": "string"},
                     },
                     "required": ["file_path"],
                 },
@@ -119,7 +220,7 @@ def main():
             "type": "function",
             "function": {
                 "name": "Write",
-                "description": "Writes the required content to the file",
+                "description": "Writes the required content to a file",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -138,7 +239,7 @@ def main():
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string"}
+                        "command": {"type": "string"},
                     },
                     "required": ["command"],
                 },
@@ -148,7 +249,7 @@ def main():
 
     while True:
         chat = client.chat.completions.create(
-            model="anthropic/claude-haiku-4.5",
+            model=MODEL,
             messages=messages,
             tools=tools,
         )
@@ -158,84 +259,81 @@ def main():
 
         message = chat.choices[0].message
 
-        # Preserve assistant content and tool calls in conversation history.
-        assistant_msg = {
+        assistant_message = {
             "role": "assistant",
             "content": message.content,
         }
 
         if message.tool_calls:
-            assistant_msg["tool_calls"] = []
-
-            for tc in message.tool_calls:
-                assistant_msg["tool_calls"].append({
-                    "id": tc.id,
-                    "type": tc.type,
+            assistant_message["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": call.type,
                     "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
+                        "name": call.function.name,
+                        "arguments": call.function.arguments,
                     },
-                })
+                }
+                for call in message.tool_calls
+            ]
 
-        messages.append(assistant_msg)
+        messages.append(assistant_message)
 
-        # Finish when the model does not request a tool.
         if not message.tool_calls:
             print(message.content or "")
-            break
+            return
 
-        # Execute requested tools and return their results.
-        for tc in message.tool_calls:
-            name = tc.function.name
-            tool_args = json.loads(tc.function.arguments)
+        for call in message.tool_calls:
+            tool_name = call.function.name
+            kwargs = json.loads(call.function.arguments)
+
+            formatted_args = ", ".join(
+                f'{key}="{value}"'
+                for key, value in kwargs.items()
+            )
+
+            print(
+                f"> {tool_name}({formatted_args})",
+                file=sys.stderr,
+            )
 
             result = ""
 
-            if name == "Read":
-                try:
-                    with open(
-                        tool_args["file_path"],
-                        "r",
-                        encoding="utf-8",
-                    ) as f:
-                        result = f.read()
-                except Exception as e:
-                    result = f"Error reading file: {e}"
+            try:
+                if tool_name == "Read":
+                    result = Path(
+                        kwargs["file_path"]
+                    ).read_text(encoding="utf-8")
 
-            elif name == "Write":
-                try:
-                    with open(
-                        tool_args["file_path"],
-                        "w",
+                elif tool_name == "Write":
+                    Path(kwargs["file_path"]).write_text(
+                        kwargs["content"],
                         encoding="utf-8",
-                    ) as f:
-                        f.write(tool_args["content"])
+                    )
                     result = "OK"
-                except Exception as e:
-                    result = f"Error writing file: {e}"
 
-            elif name == "Bash":
-                try:
-                    proc = subprocess.run(
-                        tool_args["command"],
-                        shell=True,
+                elif tool_name == "Bash":
+                    process = subprocess.run(
+                        kwargs["command"],
                         capture_output=True,
                         text=True,
+                        shell=True,
                     )
                     result = (
-                        proc.stdout
-                        if proc.stdout
-                        else proc.stderr
+                        process.stdout
+                        if process.stdout
+                        else process.stderr
                     )
-                except Exception as e:
-                    result = str(e)
 
-            else:
-                result = f"Unknown tool: {name}"
+                else:
+                    result = f"Unknown tool: {tool_name}"
+
+            except Exception as exc:
+                result = f"Tool error: {exc}"
 
             messages.append({
                 "role": "tool",
-                "tool_call_id": tc.id,
+                "tool_call_id": call.id,
                 "content": result,
             })
 
