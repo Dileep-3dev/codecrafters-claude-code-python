@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -64,12 +65,9 @@ def load_skills(skills_dir):
 
 def substitute_arguments(body, arguments):
     """Replace skill argument placeholders."""
-
-    # Replace indexed $ARGUMENTS[n] placeholders first.
     for index, argument in enumerate(arguments):
         body = body.replace(f"$ARGUMENTS[{index}]", argument)
 
-    # Replace positional placeholders such as $0, $1, and $10.
     body = re.sub(
         r"\$(\d+)",
         lambda match: (
@@ -80,19 +78,16 @@ def substitute_arguments(body, arguments):
         body,
     )
 
-    # Replace $ARGUMENTS with the complete argument string.
     body = body.replace("$ARGUMENTS", " ".join(arguments))
-
     return body
 
 
 def resolve_prompt(prompt, skills):
-    """Expand consecutive skill commands and return user messages."""
+    """Expand consecutive skill commands typed by the user."""
     tokens = prompt.split()
     expanded_bodies = []
     index = 0
 
-    # Expand skill names only while they appear consecutively at the start.
     while index < len(tokens):
         token = tokens[index]
 
@@ -101,18 +96,15 @@ def resolve_prompt(prompt, skills):
 
         skill_name = token[1:]
 
-        # An unknown skill ends expansion.
         if skill_name not in skills:
             break
 
         expanded_bodies.append(skills[skill_name]["body"])
         index += 1
 
-    # No skill was invoked; preserve the original prompt.
     if not expanded_bodies:
         return [{"role": "user", "content": prompt}]
 
-    # The remaining tokens are shared arguments for all expanded skills.
     arguments = tokens[index:]
 
     return [
@@ -137,12 +129,9 @@ def main():
         base_url=BASE_URL,
     )
 
-    # Load skills relative to the current working directory.
     skills = load_skills(Path(".claude") / "skills")
-
     messages = []
 
-    # Advertise skill names and descriptions, not their bodies.
     if skills:
         system_prompt = (
             "You have access to the following skills:\n\n"
@@ -150,6 +139,9 @@ def main():
                 f"- {skill['name']}: {skill['description']}"
                 for skill in skills.values()
             )
+            + "\n\n"
+            "If a skill matches the user's request, call the Skill tool "
+            "with its name and follow the instructions it returns."
         )
 
         messages.append({
@@ -157,7 +149,6 @@ def main():
             "content": system_prompt,
         })
 
-    # Add one user message per invoked skill.
     messages.extend(resolve_prompt(args.p, skills))
 
     tools = [
@@ -204,6 +195,27 @@ def main():
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "Skill",
+                "description": "Load a skill's instructions into the conversation",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The name of the skill to use",
+                        },
+                        "args": {
+                            "type": "string",
+                            "description": "Optional arguments for the skill",
+                        },
+                    },
+                    "required": ["name"],
+                },
+            },
+        },
     ]
 
     while True:
@@ -218,20 +230,51 @@ def main():
 
         message = chat.choices[0].message
 
-        # Preserve the complete assistant response, including tool calls.
-        messages.append(message.model_dump(exclude_none=True))
+        # Preserve the assistant response and its tool calls.
+        assistant_message = {
+            "role": "assistant",
+            "content": message.content,
+        }
+
+        if message.tool_calls:
+            assistant_message["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.function.name,
+                        "arguments": call.function.arguments,
+                    },
+                }
+                for call in message.tool_calls
+            ]
+
+        messages.append(assistant_message)
 
         if not message.tool_calls:
             print(message.content or "")
             break
 
-        # Execute each requested tool and return its result.
         for call in message.tool_calls:
             name = call.function.name
-            kwargs = json.loads(call.function.arguments)
 
             try:
-                if name == "Read":
+                kwargs = json.loads(call.function.arguments)
+
+                if name == "Skill":
+                    skill_name = kwargs.get("name", "")
+                    skill_args = kwargs.get("args", "")
+
+                    if skill_name not in skills:
+                        result = f"Error: Skill '{skill_name}' not found."
+                    else:
+                        arguments = shlex.split(skill_args)
+                        result = substitute_arguments(
+                            skills[skill_name]["body"],
+                            arguments,
+                        )
+
+                elif name == "Read":
                     result = Path(
                         kwargs["file_path"]
                     ).read_text(encoding="utf-8")
