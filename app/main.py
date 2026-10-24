@@ -63,14 +63,13 @@ def load_skills(skills_dir):
 
 
 def substitute_arguments(body, arguments):
-    """Replace skill argument placeholders with supplied arguments."""
+    """Replace skill argument placeholders."""
 
-    # Replace indexed placeholders first, e.g. $ARGUMENTS[0].
+    # Replace indexed $ARGUMENTS[n] placeholders first.
     for index, argument in enumerate(arguments):
         body = body.replace(f"$ARGUMENTS[{index}]", argument)
 
-    # Replace positional placeholders such as $0, $1, $2.
-    # The regex handles multiple-digit indices without partial matches.
+    # Replace positional placeholders such as $0, $1, and $10.
     body = re.sub(
         r"\$(\d+)",
         lambda match: (
@@ -87,15 +86,13 @@ def substitute_arguments(body, arguments):
     return body
 
 
-
 def resolve_prompt(prompt, skills):
-    """Expand consecutive slash-command skills from the start."""
+    """Expand consecutive skill commands and return user messages."""
     tokens = prompt.split()
-
-    expanded_messages = []
+    expanded_bodies = []
     index = 0
 
-    # Collect consecutive skill names at the beginning.
+    # Expand skill names only while they appear consecutively at the start.
     while index < len(tokens):
         token = tokens[index]
 
@@ -104,52 +101,27 @@ def resolve_prompt(prompt, skills):
 
         skill_name = token[1:]
 
-        # An unknown skill ends expansion. Keep this token
-        # and everything after it as the shared argument text.
+        # An unknown skill ends expansion.
         if skill_name not in skills:
             break
 
-        expanded_messages.append(skills[skill_name]["body"])
+        expanded_bodies.append(skills[skill_name]["body"])
         index += 1
 
-    # If no skills were expanded, keep the original prompt.
-    if not expanded_messages:
+    # No skill was invoked; preserve the original prompt.
+    if not expanded_bodies:
         return [{"role": "user", "content": prompt}]
 
-    # All remaining tokens are shared arguments for every skill.
+    # The remaining tokens are shared arguments for all expanded skills.
     arguments = tokens[index:]
-    argument_string = " ".join(arguments)
 
     return [
         {
             "role": "user",
-            "content": substitute_arguments(
-                body.replace("$ARGUMENTS", argument_string),
-                arguments,
-            ),
+            "content": substitute_arguments(body, arguments),
         }
-        for body in expanded_messages
+        for body in expanded_bodies
     ]
-
-    """Resolve a slash command and substitute its arguments."""
-    if not prompt.startswith("/"):
-        return prompt
-
-    parts = prompt[1:].split(maxsplit=1)
-    skill_name = parts[0]
-    argument_string = parts[1] if len(parts) > 1 else ""
-
-    skill = skills.get(skill_name)
-
-    if skill is None:
-        available = ", ".join(skills.keys()) or "(none)"
-        raise ValueError(
-            f"Unknown skill: {skill_name}. Available skills: {available}"
-        )
-
-    arguments = argument_string.split()
-
-    return substitute_arguments(skill["body"], arguments)
 
 
 def main():
@@ -165,12 +137,12 @@ def main():
         base_url=BASE_URL,
     )
 
-    # Skills are located relative to the current working directory.
+    # Load skills relative to the current working directory.
     skills = load_skills(Path(".claude") / "skills")
 
     messages = []
 
-    # Only skill names and descriptions go into the system prompt.
+    # Advertise skill names and descriptions, not their bodies.
     if skills:
         system_prompt = (
             "You have access to the following skills:\n\n"
@@ -185,8 +157,8 @@ def main():
             "content": system_prompt,
         })
 
-    # Resolve the slash command and expand placeholders before the API call.
-        messages.extend(resolve_prompt(args.p, skills))
+    # Add one user message per invoked skill.
+    messages.extend(resolve_prompt(args.p, skills))
 
     tools = [
         {
@@ -246,35 +218,17 @@ def main():
 
         message = chat.choices[0].message
 
-        assistant_message = {
-            "role": "assistant",
-            "content": message.content,
-        }
-
-        if message.tool_calls:
-            assistant_message["tool_calls"] = [
-                {
-                    "id": call.id,
-                    "type": call.type,
-                    "function": {
-                        "name": call.function.name,
-                        "arguments": call.function.arguments,
-                    },
-                }
-                for call in message.tool_calls
-            ]
-
-        messages.append(assistant_message)
+        # Preserve the complete assistant response, including tool calls.
+        messages.append(message.model_dump(exclude_none=True))
 
         if not message.tool_calls:
             print(message.content or "")
             break
 
+        # Execute each requested tool and return its result.
         for call in message.tool_calls:
             name = call.function.name
             kwargs = json.loads(call.function.arguments)
-
-            result = ""
 
             try:
                 if name == "Read":
