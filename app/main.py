@@ -87,7 +87,50 @@ def substitute_arguments(body, arguments):
     return body
 
 
+
 def resolve_prompt(prompt, skills):
+    """Expand consecutive slash-command skills from the start."""
+    tokens = prompt.split()
+
+    expanded_messages = []
+    index = 0
+
+    # Collect consecutive skill names at the beginning.
+    while index < len(tokens):
+        token = tokens[index]
+
+        if not token.startswith("/") or len(token) == 1:
+            break
+
+        skill_name = token[1:]
+
+        # An unknown skill ends expansion. Keep this token
+        # and everything after it as the shared argument text.
+        if skill_name not in skills:
+            break
+
+        expanded_messages.append(skills[skill_name]["body"])
+        index += 1
+
+    # If no skills were expanded, keep the original prompt.
+    if not expanded_messages:
+        return [{"role": "user", "content": prompt}]
+
+    # All remaining tokens are shared arguments for every skill.
+    arguments = tokens[index:]
+    argument_string = " ".join(arguments)
+
+    return [
+        {
+            "role": "user",
+            "content": substitute_arguments(
+                body.replace("$ARGUMENTS", argument_string),
+                arguments,
+            ),
+        }
+        for body in expanded_messages
+    ]
+
     """Resolve a slash command and substitute its arguments."""
     if not prompt.startswith("/"):
         return prompt
