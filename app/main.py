@@ -8,6 +8,23 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
 
+def load_skill(skill_name):
+    skill_path = os.path.join(
+        ".claude", "skills", skill_name, "SKILL.md"
+    )
+
+    with open(skill_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Remove the YAML frontmatter and return only the body
+    parts = content.split("---", 2)
+
+    if len(parts) < 3:
+        raise ValueError("Invalid SKILL.md: missing frontmatter")
+
+    return parts[2].strip()
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("-p", required=True)
