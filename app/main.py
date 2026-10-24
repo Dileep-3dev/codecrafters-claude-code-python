@@ -58,6 +58,7 @@ def load_skills(skills_dir):
             "name": name,
             "description": description,
             "body": parts[2].strip(),
+            "context": metadata.get("context", ""),
         }
 
     return skills
@@ -99,7 +100,13 @@ def resolve_prompt(prompt, skills):
         if skill_name not in skills:
             break
 
-        expanded_bodies.append(skills[skill_name]["body"])
+        skill = skills[skill_name]
+
+        # Forked skills run independently and are not stacked.
+        if skill.get("context") == "fork":
+            break
+
+        expanded_bodies.append(skill["body"])
         index += 1
 
     if not expanded_bodies:
@@ -116,42 +123,9 @@ def resolve_prompt(prompt, skills):
     ]
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-p", required=True)
-    args = parser.parse_args()
-
-    if not API_KEY:
-        raise RuntimeError("OPENROUTER_API_KEY is not set")
-
-    client = OpenAI(
-        api_key=API_KEY,
-        base_url=BASE_URL,
-    )
-
-    skills = load_skills(Path(".claude") / "skills")
-    messages = []
-
-    if skills:
-        system_prompt = (
-            "You have access to the following skills:\n\n"
-            + "\n".join(
-                f"- {skill['name']}: {skill['description']}"
-                for skill in skills.values()
-            )
-            + "\n\n"
-            "If a skill matches the user's request, call the Skill tool "
-            "with its name and follow the instructions it returns."
-        )
-
-        messages.append({
-            "role": "system",
-            "content": system_prompt,
-        })
-
-    messages.extend(resolve_prompt(args.p, skills))
-
-    tools = [
+def build_tools():
+    """Define the tools available to the agent."""
+    return [
         {
             "type": "function",
             "function": {
@@ -218,6 +192,9 @@ def main():
         },
     ]
 
+
+def run_agent(client, messages, tools, skills):
+    """Run an agent loop and return its final answer."""
     while True:
         chat = client.chat.completions.create(
             model=MODEL,
@@ -252,8 +229,7 @@ def main():
         messages.append(assistant_message)
 
         if not message.tool_calls:
-            print(message.content or "")
-            break
+            return message.content or ""
 
         for call in message.tool_calls:
             name = call.function.name
@@ -268,11 +244,36 @@ def main():
                     if skill_name not in skills:
                         result = f"Error: Skill '{skill_name}' not found."
                     else:
+                        skill = skills[skill_name]
                         arguments = shlex.split(skill_args)
-                        result = substitute_arguments(
-                            skills[skill_name]["body"],
+                        body = substitute_arguments(
+                            skill["body"],
                             arguments,
                         )
+
+                        if skill.get("context") == "fork":
+                            # Start a completely separate conversation.
+                            # Do not include the main conversation or question.
+                            subagent_messages = [
+                                {
+                                    "role": "user",
+                                    "content": body,
+                                }
+                            ]
+
+                            subagent_answer = run_agent(
+                                client,
+                                subagent_messages,
+                                tools,
+                                skills,
+                            )
+
+                            result = (
+                                f"Skill {skill_name} ran in a separate "
+                                f"context and returned: {subagent_answer}"
+                            )
+                        else:
+                            result = body
 
                 elif name == "Read":
                     result = Path(
@@ -310,6 +311,47 @@ def main():
                 "tool_call_id": call.id,
                 "content": result,
             })
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-p", required=True)
+    args = parser.parse_args()
+
+    if not API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY is not set")
+
+    client = OpenAI(
+        api_key=API_KEY,
+        base_url=BASE_URL,
+    )
+
+    skills = load_skills(Path(".claude") / "skills")
+    messages = []
+
+    if skills:
+        system_prompt = (
+            "You have access to the following skills:\n\n"
+            + "\n".join(
+                f"- {skill['name']}: {skill['description']}"
+                for skill in skills.values()
+            )
+            + "\n\n"
+            "If a skill matches the user's request, call the Skill tool "
+            "with its name and follow the instructions it returns."
+        )
+
+        messages.append({
+            "role": "system",
+            "content": system_prompt,
+        })
+
+    messages.extend(resolve_prompt(args.p, skills))
+
+    tools = build_tools()
+
+    answer = run_agent(client, messages, tools, skills)
+    print(answer)
 
 
 if __name__ == "__main__":
