@@ -1,11 +1,10 @@
 
 import argparse
-import json
 import os
-import re
+import json
 import subprocess
 import sys
-from dataclasses import dataclass
+import re
 from pathlib import Path
 
 import yaml
@@ -23,143 +22,85 @@ MODEL = os.getenv(
 )
 
 
-@dataclass(frozen=True)
-class Skill:
-    name: str
-    description: str
-    path: Path
-    body: str
+def load_skills(skills_dir):
+    skills = {}
+
+    if not skills_dir.is_dir():
+        return skills
+
+    for skill_file in skills_dir.glob("*/SKILL.md"):
+        content = skill_file.read_text(encoding="utf-8")
+        parts = content.split("---", maxsplit=2)
+
+        if (
+            len(parts) != 3
+            or parts[0].strip()
+            or not parts[1].strip()
+        ):
+            continue
+
+        try:
+            metadata = yaml.safe_load(parts[1])
+        except yaml.YAMLError:
+            continue
+
+        if not isinstance(metadata, dict):
+            continue
+
+        name = metadata.get("name")
+        description = metadata.get("description")
+
+        if not isinstance(name, str) or not isinstance(description, str):
+            continue
+
+        skills[name] = {
+            "name": name,
+            "description": description,
+            "body": parts[2].strip(),
+        }
+
+    return skills
 
 
-@dataclass
-class Skills:
-    skills: dict[str, Skill]
-
-    @staticmethod
-    def load(path: Path) -> "Skills":
-        skills = {}
-
-        if not path.is_dir():
-            return Skills(skills={})
-
-        for skill_path in sorted(path.glob("*/SKILL.md")):
-            try:
-                content = skill_path.read_text(encoding="utf-8")
-            except OSError as exc:
-                print(
-                    f"WARN: Cannot read {skill_path}: {exc}",
-                    file=sys.stderr,
-                )
-                continue
-
-            sections = content.split("---", maxsplit=2)
-
-            if (
-                len(sections) != 3
-                or sections[0].strip()
-                or not sections[1].strip()
-            ):
-                print(
-                    f"WARN: Invalid frontmatter in {skill_path}",
-                    file=sys.stderr,
-                )
-                continue
-
-            try:
-                metadata = yaml.safe_load(sections[1])
-            except yaml.YAMLError as exc:
-                print(
-                    f"WARN: Invalid YAML in {skill_path}: {exc}",
-                    file=sys.stderr,
-                )
-                continue
-
-            if not isinstance(metadata, dict):
-                print(
-                    f"WARN: Invalid metadata in {skill_path}",
-                    file=sys.stderr,
-                )
-                continue
-
-            name = metadata.get("name")
-            description = metadata.get("description")
-
-            if not isinstance(name, str) or not name.strip():
-                print(
-                    f"WARN: Missing name in {skill_path}",
-                    file=sys.stderr,
-                )
-                continue
-
-            if not isinstance(description, str) or not description.strip():
-                print(
-                    f"WARN: Missing description in {skill_path}",
-                    file=sys.stderr,
-                )
-                continue
-
-            skills[name] = Skill(
-                name=name,
-                description=description,
-                path=skill_path,
-                body=sections[2].strip(),
-            )
-
-        return Skills(skills=skills)
-
-    def is_empty(self) -> bool:
-        return not self.skills
-
-    def level1_system_prompt(self) -> str:
-        lines = [
-            "You have access to the following skills:",
-            "",
-        ]
-
-        lines.extend(
-            f"- {skill.name}: {skill.description}"
-            for skill in self.skills.values()
-        )
-
-        return "\n".join(lines)
-
-
-def expand_skill_arguments(body: str, arguments: list[str]) -> str:
-    # Replace indexed placeholders first, before $ARGUMENTS.
+def substitute_arguments(body, arguments):
+    # Replace indexed placeholders first.
+    # The negative lookahead prevents $1 from matching $10.
     for index, argument in enumerate(arguments):
         body = body.replace(f"$ARGUMENTS[{index}]", argument)
-        body = re.sub(
-            rf"\${index}(?!\d)",
-            lambda _: argument,
-            body,
-        )
 
-    # Replace $ARGUMENTS with all supplied arguments.
+    body = re.sub(
+        r"\$(\d+)",
+        lambda match: (
+            arguments[int(match.group(1))]
+            if int(match.group(1)) < len(arguments)
+            else ""
+        ),
+        body,
+    )
+
+    # Replace $ARGUMENTS with the complete argument string.
     body = body.replace("$ARGUMENTS", " ".join(arguments))
 
     return body
 
 
-def resolve_prompt(prompt: str, skills: Skills) -> str:
+def resolve_prompt(prompt, skills):
     if not prompt.startswith("/"):
         return prompt
 
-    command_parts = prompt[1:].split(maxsplit=1)
-    skill_name = command_parts[0]
-    argument_text = command_parts[1] if len(command_parts) > 1 else ""
+    parts = prompt[1:].split(maxsplit=1)
+    skill_name = parts[0]
+    argument_string = parts[1] if len(parts) > 1 else ""
 
-    skill = skills.skills.get(skill_name)
+    if skill_name not in skills:
+        raise ValueError(f"Unknown skill: {skill_name}")
 
-    if skill is None:
-        available = ", ".join(skills.skills.keys()) or "(none)"
-        raise ValueError(
-            f"Unknown skill: {skill_name}. Available skills: {available}"
-        )
+    # Split arguments on whitespace, as required by the stage.
+    arguments = argument_string.split()
 
-    # Split arguments on whitespace, as in the example implementation.
-    arguments = argument_text.split()
+    body = skills[skill_name]["body"]
 
-    return expand_skill_arguments(skill.body, arguments)
+    return substitute_arguments(body, arguments)
 
 
 def main():
@@ -175,30 +116,29 @@ def main():
         base_url=BASE_URL,
     )
 
-    # Load skill metadata and bodies into memory.
-    # Only the selected skill's body will be sent to the model.
-    skills = Skills.load(Path(".claude/skills"))
+    skills = load_skills(Path(".claude/skills"))
 
     messages = []
 
-    if not skills.is_empty():
-        system_prompt = skills.level1_system_prompt()
+    if skills:
+        system_prompt = (
+            "You have access to the following skills:\n\n"
+            + "\n".join(
+                f"- {skill['name']}: {skill['description']}"
+                for skill in skills.values()
+            )
+        )
         messages.append({
             "role": "system",
             "content": system_prompt,
         })
 
-        print(
-            f"=== SYSTEM PROMPT ===\n"
-            f"{system_prompt}\n"
-            f"=====================",
-            file=sys.stderr,
-        )
+    # Resolve slash command and substitute its arguments.
+    user_prompt = resolve_prompt(args.p, skills)
 
-    prompt = resolve_prompt(args.p, skills)
     messages.append({
         "role": "user",
-        "content": prompt,
+        "content": user_prompt,
     })
 
     tools = [
@@ -210,7 +150,7 @@ def main():
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "file_path": {"type": "string"},
+                        "file_path": {"type": "string"}
                     },
                     "required": ["file_path"],
                 },
@@ -239,7 +179,7 @@ def main():
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string"},
+                        "command": {"type": "string"}
                     },
                     "required": ["command"],
                 },
@@ -281,43 +221,31 @@ def main():
 
         if not message.tool_calls:
             print(message.content or "")
-            return
+            break
 
         for call in message.tool_calls:
-            tool_name = call.function.name
+            name = call.function.name
             kwargs = json.loads(call.function.arguments)
 
-            formatted_args = ", ".join(
-                f'{key}="{value}"'
-                for key, value in kwargs.items()
-            )
-
-            print(
-                f"> {tool_name}({formatted_args})",
-                file=sys.stderr,
-            )
-
-            result = ""
-
             try:
-                if tool_name == "Read":
+                if name == "Read":
                     result = Path(
                         kwargs["file_path"]
                     ).read_text(encoding="utf-8")
 
-                elif tool_name == "Write":
+                elif name == "Write":
                     Path(kwargs["file_path"]).write_text(
                         kwargs["content"],
                         encoding="utf-8",
                     )
                     result = "OK"
 
-                elif tool_name == "Bash":
+                elif name == "Bash":
                     process = subprocess.run(
                         kwargs["command"],
+                        shell=True,
                         capture_output=True,
                         text=True,
-                        shell=True,
                     )
                     result = (
                         process.stdout
@@ -326,7 +254,7 @@ def main():
                     )
 
                 else:
-                    result = f"Unknown tool: {tool_name}"
+                    result = f"Unknown tool: {name}"
 
             except Exception as exc:
                 result = f"Tool error: {exc}"
